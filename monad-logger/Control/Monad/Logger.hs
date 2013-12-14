@@ -1,9 +1,10 @@
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-}
 -- |  This module provides the facilities needed for a decoupled logging system.
@@ -25,11 +26,12 @@ module Control.Monad.Logger
     , LogLevel(..)
     , LogSource
     -- * Helper transformer
-    , LoggingT (..)
     , runStderrLoggingT
     , runStdoutLoggingT
+    , runNoLoggingT
     , withChannelLogger
-    , NoLoggingT (..)
+    , LogFunc
+    , defaultLogFunc
     -- * TH logging
     , logDebug
     , logInfo
@@ -59,58 +61,28 @@ module Control.Monad.Logger
     ) where
 
 import Language.Haskell.TH.Syntax (Lift (lift), Q, Exp, Loc (..), qLocation)
-#if MIN_VERSION_fast_logger(0, 2, 0)
 import System.Log.FastLogger (LogStr, pushLogStr, ToLogStr (toLogStr), LoggerSet, newLoggerSet, defaultBufSize)
 import System.IO.Unsafe (unsafePerformIO)
-#define Handle LoggerSet
 import Data.Monoid (mempty, mappend)
 import qualified GHC.IO.FD as FD
-#else
-import System.Log.FastLogger (ToLogStr (toLogStr), LogStr (..))
-import System.IO (stdout, stderr, Handle)
-#endif
 
-import Data.Monoid (Monoid)
-
-import Control.Applicative (Applicative (..))
+import Control.Applicative (Const (..))
 import Control.Concurrent.STM
 import Control.Concurrent.STM.TBChan
 import Control.Exception.Lifted
-import Control.Monad (liftM, ap, when, void)
-import Control.Monad.Base (MonadBase (liftBase))
+import Control.Monad (when, void)
 import Control.Monad.Loops (untilM)
-import Control.Monad.Trans.Control (MonadBaseControl (..), MonadTransControl (..))
-import qualified Control.Monad.Trans.Class as Trans
+import Control.Monad.Trans.Control (MonadBaseControl (..))
 
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Control.Monad.Trans.Resource (MonadResource (liftResourceT), MonadThrow (monadThrow))
 
-import Control.Monad.Trans.Identity ( IdentityT)
-import Control.Monad.Trans.List     ( ListT    )
-import Control.Monad.Trans.Maybe    ( MaybeT   )
-import Control.Monad.Trans.Error    ( ErrorT, Error)
-import Control.Monad.Trans.Reader   ( ReaderT  )
-import Control.Monad.Trans.Cont     ( ContT  )
-import Control.Monad.Trans.State    ( StateT   )
-import Control.Monad.Trans.Writer   ( WriterT  )
-import Control.Monad.Trans.RWS      ( RWST     )
-import Control.Monad.Trans.Resource ( ResourceT)
-import Data.Conduit.Internal        ( Pipe, ConduitM )
-
-import qualified Control.Monad.Trans.RWS.Strict    as Strict ( RWST   )
-import qualified Control.Monad.Trans.State.Strict  as Strict ( StateT )
-import qualified Control.Monad.Trans.Writer.Strict as Strict ( WriterT )
+import Control.Monad.Trans.Reader   ( ReaderT (..) )
 
 import Data.Text (Text, pack, unpack)
 import qualified Data.Text as T
 import qualified Data.ByteString.Char8 as S8
 
-import Control.Monad.Cont.Class   ( MonadCont (..) )
-import Control.Monad.Error.Class  ( MonadError (..) )
-import Control.Monad.RWS.Class    ( MonadRWS )
 import Control.Monad.Reader.Class ( MonadReader (..) )
-import Control.Monad.State.Class  ( MonadState (..) )
-import Control.Monad.Writer.Class ( MonadWriter (..) )
 
 data LogLevel = LevelDebug | LevelInfo | LevelWarn | LevelError | LevelOther Text
     deriving (Eq, Prelude.Show, Prelude.Read, Ord)
@@ -124,37 +96,23 @@ instance Lift LogLevel where
 
 type LogSource = Text
 
+type LogFunc = Loc -> LogSource -> LogLevel -> LogStr -> IO ()
+
 class Monad m => MonadLogger m where
-    monadLoggerLog :: ToLogStr msg => Loc -> LogSource -> LogLevel -> msg -> m ()
+    monadLoggerLog :: Loc -> LogSource -> LogLevel -> LogStr -> m ()
+instance (MonadIO m, MonadReader env m, HasLogFunc env) => MonadLogger m where
+    monadLoggerLog a b c d = do
+        env <- ask
+        liftIO $ getConst (logFunc Const env) a b c d
 
-{-
-instance MonadLogger IO          where monadLoggerLog _ _ _ = return ()
-instance MonadLogger Identity    where monadLoggerLog _ _ _ = return ()
-instance MonadLogger (ST s)      where monadLoggerLog _ _ _ = return ()
-instance MonadLogger (Lazy.ST s) where monadLoggerLog _ _ _ = return ()
--}
-
-#define DEF monadLoggerLog a b c d = Trans.lift $ monadLoggerLog a b c d
-instance MonadLogger m => MonadLogger (IdentityT m) where DEF
-instance MonadLogger m => MonadLogger (ListT m) where DEF
-instance MonadLogger m => MonadLogger (MaybeT m) where DEF
-instance (MonadLogger m, Error e) => MonadLogger (ErrorT e m) where DEF
-instance MonadLogger m => MonadLogger (ReaderT r m) where DEF
-instance MonadLogger m => MonadLogger (ContT r m) where DEF
-instance MonadLogger m => MonadLogger (StateT s m) where DEF
-instance (MonadLogger m, Monoid w) => MonadLogger (WriterT w m) where DEF
-instance (MonadLogger m, Monoid w) => MonadLogger (RWST r w s m) where DEF
-instance MonadLogger m => MonadLogger (ResourceT m) where DEF
-instance MonadLogger m => MonadLogger (Pipe l i o u m) where DEF
-instance MonadLogger m => MonadLogger (ConduitM i o m) where DEF
-instance MonadLogger m => MonadLogger (Strict.StateT s m) where DEF
-instance (MonadLogger m, Monoid w) => MonadLogger (Strict.WriterT w m) where DEF
-instance (MonadLogger m, Monoid w) => MonadLogger (Strict.RWST r w s m) where DEF
-#undef DEF
+class HasLogFunc a where
+    logFunc :: forall f. Functor f => (LogFunc -> f LogFunc) -> a -> f a
+instance HasLogFunc LogFunc where
+    logFunc = id
 
 logTH :: LogLevel -> Q Exp
 logTH level =
-    [|monadLoggerLog $(qLocation >>= liftLoc) (pack "") $(lift level) . (id :: Text -> Text)|]
+    [|monadLoggerLog $(qLocation >>= liftLoc) (pack "") $(lift level) . (toLogStr :: Text -> LogStr)|]
 
 -- | Generates a function that takes a 'Text' and logs a 'LevelDebug' message. Usage:
 --
@@ -194,132 +152,29 @@ liftLoc (Loc a b c (d1, d2) (e1, e2)) = [|Loc
 --
 -- > $logDebugS "SomeSource" "This is a debug log message"
 logDebugS :: Q Exp
-logDebugS = [|\a b -> monadLoggerLog $(qLocation >>= liftLoc) a LevelDebug (b :: Text)|]
+logDebugS = [|\a -> monadLoggerLog $(qLocation >>= liftLoc) a LevelDebug . (toLogStr :: Text -> LogStr)|]
 
 -- | See 'logDebugS'
 logInfoS :: Q Exp
-logInfoS = [|\a b -> monadLoggerLog $(qLocation >>= liftLoc) a LevelInfo (b :: Text)|]
+logInfoS = [|\a -> monadLoggerLog $(qLocation >>= liftLoc) a LevelInfo . (toLogStr :: Text -> LogStr)|]
 -- | See 'logDebugS'
 logWarnS :: Q Exp
-logWarnS = [|\a b -> monadLoggerLog $(qLocation >>= liftLoc) a LevelWarn (b :: Text)|]
+logWarnS = [|\a -> monadLoggerLog $(qLocation >>= liftLoc) a LevelWarn . (toLogStr :: Text -> LogStr)|]
 -- | See 'logDebugS'
 logErrorS :: Q Exp
-logErrorS = [|\a b -> monadLoggerLog $(qLocation >>= liftLoc) a LevelError (b :: Text)|]
+logErrorS = [|\a -> monadLoggerLog $(qLocation >>= liftLoc) a LevelError . (toLogStr :: Text -> LogStr)|]
 
 -- | Generates a function that takes a 'LogSource', a level name and a 'Text' and logs a 'LevelOther' message. Usage:
 --
 -- > $logOtherS "SomeSource" "My new level" "This is a log message"
 logOtherS :: Q Exp
-logOtherS = [|\src level msg -> monadLoggerLog $(qLocation >>= liftLoc) src (LevelOther level) (msg :: Text)|]
+logOtherS = [|\src level -> monadLoggerLog $(qLocation >>= liftLoc) src (LevelOther level) . (toLogStr :: Text -> LogStr)|]
 
--- | Monad transformer that disables logging.
---
--- Since 0.2.4
-newtype NoLoggingT m a = NoLoggingT { runNoLoggingT :: m a }
+defaultLogFunc :: LoggerSet -> LogFunc
+defaultLogFunc ls a b c d = pushLogStr ls (defaultRender a b c d)
 
-instance Monad m => Functor (NoLoggingT m) where
-    fmap = liftM
-
-instance Monad m => Applicative (NoLoggingT m) where
-    pure = return
-    (<*>) = ap
-
-instance Monad m => Monad (NoLoggingT m) where
-    return = NoLoggingT . return
-    NoLoggingT ma >>= f = NoLoggingT $ ma >>= runNoLoggingT . f
-
-instance MonadIO m => MonadIO (NoLoggingT m) where
-    liftIO = Trans.lift . liftIO
-
-instance MonadThrow m => MonadThrow (NoLoggingT m) where
-    monadThrow = Trans.lift . monadThrow
-
-instance MonadResource m => MonadResource (NoLoggingT m) where
-    liftResourceT = Trans.lift . liftResourceT
-
-instance MonadBase b m => MonadBase b (NoLoggingT m) where
-    liftBase = Trans.lift . liftBase
-
-instance Trans.MonadTrans NoLoggingT where
-    lift = NoLoggingT
-
-instance MonadTransControl NoLoggingT where
-    newtype StT NoLoggingT a = StIdent {unStIdent :: a}
-    liftWith f = NoLoggingT $ f $ \(NoLoggingT t) -> liftM StIdent t
-    restoreT = NoLoggingT . liftM unStIdent
-    {-# INLINE liftWith #-}
-    {-# INLINE restoreT #-}
-
-instance MonadBaseControl b m => MonadBaseControl b (NoLoggingT m) where
-     newtype StM (NoLoggingT m) a = StMT' (StM m a)
-     liftBaseWith f = NoLoggingT $
-         liftBaseWith $ \runInBase ->
-             f $ liftM StMT' . runInBase . (\(NoLoggingT r) -> r)
-     restoreM (StMT' base) = NoLoggingT $ restoreM base
-
-instance MonadIO m => MonadLogger (NoLoggingT m) where
-    monadLoggerLog _ _ _ _ = return ()
-
--- | Monad transformer that adds a new logging function.
---
--- Since 0.2.2
-newtype LoggingT m a = LoggingT { runLoggingT :: (Loc -> LogSource -> LogLevel -> LogStr -> IO ()) -> m a }
-
-instance Monad m => Functor (LoggingT m) where
-    fmap = liftM
-
-instance Monad m => Applicative (LoggingT m) where
-    pure = return
-    (<*>) = ap
-
-instance Monad m => Monad (LoggingT m) where
-    return = LoggingT . const . return
-    LoggingT ma >>= f = LoggingT $ \r -> do
-        a <- ma r
-        let LoggingT f' = f a
-        f' r
-
-instance MonadIO m => MonadIO (LoggingT m) where
-    liftIO = Trans.lift . liftIO
-
-instance MonadThrow m => MonadThrow (LoggingT m) where
-    monadThrow = Trans.lift . monadThrow
-
-instance MonadResource m => MonadResource (LoggingT m) where
-    liftResourceT = Trans.lift . liftResourceT
-
-instance MonadBase b m => MonadBase b (LoggingT m) where
-    liftBase = Trans.lift . liftBase
-
-instance Trans.MonadTrans LoggingT where
-    lift = LoggingT . const
-
-instance MonadTransControl LoggingT where
-    newtype StT LoggingT a = StReader {unStReader :: a}
-    liftWith f = LoggingT $ \r -> f $ \(LoggingT t) -> liftM StReader $ t r
-    restoreT = LoggingT . const . liftM unStReader
-    {-# INLINE liftWith #-}
-    {-# INLINE restoreT #-}
-
-instance MonadBaseControl b m => MonadBaseControl b (LoggingT m) where
-     newtype StM (LoggingT m) a = StMT (StM m a)
-     liftBaseWith f = LoggingT $ \reader' ->
-         liftBaseWith $ \runInBase ->
-             f $ liftM StMT . runInBase . (\(LoggingT r) -> r reader')
-     restoreM (StMT base) = LoggingT $ const $ restoreM base
-
-instance MonadIO m => MonadLogger (LoggingT m) where
-    monadLoggerLog a b c d = LoggingT $ \f -> liftIO $ f a b c (toLogStr d)
-
-defaultOutput :: Handle
-              -> Loc
-              -> LogSource
-              -> LogLevel
-              -> LogStr
-              -> IO ()
-defaultOutput h loc src level msg =
-#if MIN_VERSION_fast_logger(0, 2, 0)
-    pushLogStr h $
+defaultRender :: Loc -> LogSource -> LogLevel -> LogStr -> LogStr
+defaultRender loc src level msg =
     "[" `mappend`
     (case level of
         LevelOther t -> toLogStr t
@@ -329,31 +184,13 @@ defaultOutput h loc src level msg =
         else "#" `mappend` toLogStr src) `mappend`
     "] " `mappend`
     msg `mappend`
-    " @(" `mappend`
-    toLogStr (S8.pack fileLocStr) `mappend`
-    ")\n"
+    (if isDefaultLoc loc
+        then "\n"
+        else
+            " @(" `mappend`
+            toLogStr (S8.pack fileLocStr) `mappend`
+            ")\n")
   where
-#else
-    S8.hPutStrLn h $ S8.concat bs
-  where
-    bs =
-        [ S8.pack "["
-        , case level of
-            LevelOther t -> encodeUtf8 t
-            _ -> encodeUtf8 $ pack $ drop 5 $ show level
-        , if T.null src
-            then S8.empty
-            else encodeUtf8 $ '#' `T.cons` src
-        , S8.pack "] "
-        , case msg of
-            LS s -> encodeUtf8 $ pack s
-            LB b -> b
-        , S8.pack " @("
-        , encodeUtf8 $ pack fileLocStr
-        , S8.pack ")\n"
-        ]
-#endif
-
     -- taken from file-location package
     -- turn the TH Loc loaction information into a human readable string
     -- leaving out the loc_end parameter
@@ -363,25 +200,26 @@ defaultOutput h loc src level msg =
         line = show . fst . loc_start
         char = show . snd . loc_start
 
-#if MIN_VERSION_fast_logger(0, 2, 0)
 stdout, stderr :: LoggerSet
 stdout = unsafePerformIO $ newLoggerSet defaultBufSize FD.stdout
 {-# NOINLINE stdout #-}
 stderr = unsafePerformIO $ newLoggerSet defaultBufSize FD.stderr
 {-# NOINLINE stderr #-}
-#endif
 
 -- | Run a block using a @MonadLogger@ instance which prints to stderr.
 --
 -- Since 0.2.2
-runStderrLoggingT :: MonadIO m => LoggingT m a -> m a
-runStderrLoggingT = (`runLoggingT` defaultOutput stderr)
+runStderrLoggingT :: ReaderT LogFunc m a -> m a
+runStderrLoggingT = (`runReaderT` defaultLogFunc stderr)
 
 -- | Run a block using a @MonadLogger@ instance which prints to stdout.
 --
 -- Since 0.2.2
-runStdoutLoggingT :: MonadIO m => LoggingT m a -> m a
-runStdoutLoggingT = (`runLoggingT` defaultOutput stdout)
+runStdoutLoggingT :: ReaderT LogFunc m a -> m a
+runStdoutLoggingT = (`runReaderT` defaultLogFunc stdout)
+
+runNoLoggingT :: ReaderT LogFunc m a -> m a
+runNoLoggingT = (`runReaderT` (\_ _ _ _ -> return ()))
 
 -- | Within the 'LoggingT' monad, capture all log messages to a bounded
 --   channel of the indicated size, and only actually log them if there is an
@@ -390,11 +228,11 @@ runStdoutLoggingT = (`runLoggingT` defaultOutput stdout)
 -- Since 0.3.2
 withChannelLogger :: (MonadBaseControl IO m, MonadIO m)
                   => Int         -- ^ Number of mesasges to keep
-                  -> LoggingT m a
-                  -> LoggingT m a
-withChannelLogger size action = LoggingT $ \logger -> do
+                  -> ReaderT LogFunc m a
+                  -> ReaderT LogFunc m a
+withChannelLogger size action = ReaderT $ \logger -> do
     chan <- liftIO $ newTBChanIO size
-    runLoggingT action (channelLogger chan logger) `onException` dumpLogs chan
+    runReaderT action (channelLogger chan logger) `onException` dumpLogs chan
   where
     channelLogger chan logger loc src lvl str = atomically $ do
         full <- isFullTBChan chan
@@ -404,70 +242,55 @@ withChannelLogger size action = LoggingT $ \logger -> do
     dumpLogs chan = liftIO $
         sequence_ =<< atomically (untilM (readTBChan chan) (isEmptyTBChan chan))
 
-instance MonadCont m => MonadCont (LoggingT m) where
-  callCC f = LoggingT $ \i -> callCC $ \c -> runLoggingT (f (LoggingT . const . c)) i
-
-instance MonadError e m => MonadError e (LoggingT m) where
-  throwError = Trans.lift . throwError
-  catchError r h = LoggingT $ \i -> runLoggingT r i `catchError` \e -> runLoggingT (h e) i
-
-instance MonadRWS r w s m => MonadRWS r w s (LoggingT m)
-
-instance MonadReader r m => MonadReader r (LoggingT m) where
-  ask = Trans.lift ask
-  local = mapLoggingT . local
-
-mapLoggingT :: (m a -> n b) -> LoggingT m a -> LoggingT n b
-mapLoggingT f = LoggingT . (f .) . runLoggingT
-
-instance MonadState s m => MonadState s (LoggingT m) where
-  get = Trans.lift get
-  put = Trans.lift . put
-
-instance MonadWriter w m => MonadWriter w (LoggingT m) where
-  tell   = Trans.lift . tell
-  listen = mapLoggingT listen
-  pass   = mapLoggingT pass
-
 defaultLoc :: Loc
 defaultLoc = Loc "<unknown>" "<unknown>" "<unknown>" (0,0) (0,0)
 
+isDefaultLoc :: Loc -> Bool
+isDefaultLoc (Loc a b c d e) =
+    (a == v) &&
+    (b == w) &&
+    (c == x) &&
+    (d == y) &&
+    (e == z)
+  where
+    Loc v w x y z = defaultLoc
+
 logDebugN :: MonadLogger m => Text -> m ()
-logDebugN msg =
-    monadLoggerLog defaultLoc "" LevelDebug msg
+logDebugN =
+    monadLoggerLog defaultLoc "" LevelDebug . toLogStr
 
 logInfoN :: MonadLogger m => Text -> m ()
-logInfoN msg =
-    monadLoggerLog defaultLoc "" LevelInfo msg
+logInfoN =
+    monadLoggerLog defaultLoc "" LevelInfo . toLogStr
 
 logWarnN :: MonadLogger m => Text -> m ()
-logWarnN msg =
-    monadLoggerLog defaultLoc "" LevelWarn msg
+logWarnN =
+    monadLoggerLog defaultLoc "" LevelWarn . toLogStr
 
 logErrorN :: MonadLogger m => Text -> m ()
-logErrorN msg =
-    monadLoggerLog defaultLoc "" LevelError msg
+logErrorN =
+    monadLoggerLog defaultLoc "" LevelError . toLogStr
 
 logOtherN :: MonadLogger m => LogLevel -> Text -> m ()
-logOtherN level msg =
-    monadLoggerLog defaultLoc "" level msg
+logOtherN level =
+    monadLoggerLog defaultLoc "" level . toLogStr
 
 logDebugNS :: MonadLogger m => Text -> Text -> m ()
-logDebugNS src msg =
-    monadLoggerLog defaultLoc src LevelDebug msg
+logDebugNS src =
+    monadLoggerLog defaultLoc src LevelDebug . toLogStr
 
 logInfoNS :: MonadLogger m => Text -> Text -> m ()
-logInfoNS src msg =
-    monadLoggerLog defaultLoc src LevelInfo msg
+logInfoNS src =
+    monadLoggerLog defaultLoc src LevelInfo . toLogStr
 
 logWarnNS :: MonadLogger m => Text -> Text -> m ()
-logWarnNS src msg =
-    monadLoggerLog defaultLoc src LevelWarn msg
+logWarnNS src =
+    monadLoggerLog defaultLoc src LevelWarn . toLogStr
 
 logErrorNS :: MonadLogger m => Text -> Text -> m ()
-logErrorNS src msg =
-    monadLoggerLog defaultLoc src LevelError msg
+logErrorNS src =
+    monadLoggerLog defaultLoc src LevelError . toLogStr
 
 logOtherNS :: MonadLogger m => Text -> LogLevel -> Text -> m ()
-logOtherNS src level msg =
-    monadLoggerLog defaultLoc src level msg
+logOtherNS src level =
+    monadLoggerLog defaultLoc src level . toLogStr
