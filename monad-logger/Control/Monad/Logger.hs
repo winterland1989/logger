@@ -24,6 +24,7 @@ module Control.Monad.Logger
     ( -- * MonadLogger
       MonadLogger(..)
     , LogLevel(..)
+    , HasLogFunc (..)
     , LogSource
     -- * Helper transformer
     , runStderrLoggingT
