@@ -22,7 +22,9 @@
 -- 'logDebug' for more information.
 module Control.Monad.Logger
     ( -- * MonadLogger
-      MonadLogger(..)
+      MonadLogger
+    , monadLoggerLog
+    , askLogFunc
     , LogLevel(..)
     , HasLogFunc (..)
     , LogSource
@@ -71,7 +73,7 @@ import Control.Applicative (Const (..))
 import Control.Concurrent.STM
 import Control.Concurrent.STM.TBChan
 import Control.Exception.Lifted
-import Control.Monad (when, void)
+import Control.Monad (when, void, liftM)
 import Control.Monad.Loops (untilM)
 import Control.Monad.Trans.Control (MonadBaseControl (..))
 
@@ -99,16 +101,15 @@ type LogSource = Text
 
 type LogFunc = Loc -> LogSource -> LogLevel -> LogStr -> IO ()
 
-class Monad m => MonadLogger m where
-    monadLoggerLog :: Loc -> LogSource -> LogLevel -> LogStr -> m ()
-    askLogFunc :: m LogFunc
-instance (MonadIO m, MonadReader env m, HasLogFunc env) => MonadLogger m where
-    monadLoggerLog a b c d = do
-        env <- ask
-        liftIO $ getConst (logFunc Const env) a b c d
-    askLogFunc = do
-        env <- ask
-        return $ getConst $ logFunc Const env
+type MonadLogger env m = (MonadIO m, MonadReader env m, HasLogFunc env)
+
+monadLoggerLog :: MonadLogger env m => Loc -> LogSource -> LogLevel -> LogStr -> m ()
+monadLoggerLog a b c d = do
+    env <- ask
+    liftIO $ getConst (logFunc Const env) a b c d
+
+askLogFunc :: (MonadReader env m, HasLogFunc env) => m LogFunc
+askLogFunc = (getConst . logFunc Const) `liftM` ask
 
 class HasLogFunc a where
     logFunc :: forall f. Functor f => (LogFunc -> f LogFunc) -> a -> f a
@@ -260,42 +261,42 @@ isDefaultLoc (Loc a b c d e) =
   where
     Loc v w x y z = defaultLoc
 
-logDebugN :: MonadLogger m => Text -> m ()
+logDebugN :: MonadLogger env m => Text -> m ()
 logDebugN =
     monadLoggerLog defaultLoc "" LevelDebug . toLogStr
 
-logInfoN :: MonadLogger m => Text -> m ()
+logInfoN :: MonadLogger env m => Text -> m ()
 logInfoN =
     monadLoggerLog defaultLoc "" LevelInfo . toLogStr
 
-logWarnN :: MonadLogger m => Text -> m ()
+logWarnN :: MonadLogger env m => Text -> m ()
 logWarnN =
     monadLoggerLog defaultLoc "" LevelWarn . toLogStr
 
-logErrorN :: MonadLogger m => Text -> m ()
+logErrorN :: MonadLogger env m => Text -> m ()
 logErrorN =
     monadLoggerLog defaultLoc "" LevelError . toLogStr
 
-logOtherN :: MonadLogger m => LogLevel -> Text -> m ()
+logOtherN :: MonadLogger env m => LogLevel -> Text -> m ()
 logOtherN level =
     monadLoggerLog defaultLoc "" level . toLogStr
 
-logDebugNS :: MonadLogger m => Text -> Text -> m ()
+logDebugNS :: MonadLogger env m => Text -> Text -> m ()
 logDebugNS src =
     monadLoggerLog defaultLoc src LevelDebug . toLogStr
 
-logInfoNS :: MonadLogger m => Text -> Text -> m ()
+logInfoNS :: MonadLogger env m => Text -> Text -> m ()
 logInfoNS src =
     monadLoggerLog defaultLoc src LevelInfo . toLogStr
 
-logWarnNS :: MonadLogger m => Text -> Text -> m ()
+logWarnNS :: MonadLogger env m => Text -> Text -> m ()
 logWarnNS src =
     monadLoggerLog defaultLoc src LevelWarn . toLogStr
 
-logErrorNS :: MonadLogger m => Text -> Text -> m ()
+logErrorNS :: MonadLogger env m => Text -> Text -> m ()
 logErrorNS src =
     monadLoggerLog defaultLoc src LevelError . toLogStr
 
-logOtherNS :: MonadLogger m => Text -> LogLevel -> Text -> m ()
+logOtherNS :: MonadLogger env m => Text -> LogLevel -> Text -> m ()
 logOtherNS src level =
     monadLoggerLog defaultLoc src level . toLogStr
