@@ -101,10 +101,14 @@ type LogFunc = Loc -> LogSource -> LogLevel -> LogStr -> IO ()
 
 class Monad m => MonadLogger m where
     monadLoggerLog :: Loc -> LogSource -> LogLevel -> LogStr -> m ()
+    askLogFunc :: m LogFunc
 instance (MonadIO m, MonadReader env m, HasLogFunc env) => MonadLogger m where
     monadLoggerLog a b c d = do
         env <- ask
         liftIO $ getConst (logFunc Const env) a b c d
+    askLogFunc = do
+        env <- ask
+        return $ getConst $ logFunc Const env
 
 class HasLogFunc a where
     logFunc :: forall f. Functor f => (LogFunc -> f LogFunc) -> a -> f a
