@@ -33,6 +33,8 @@ module Control.Monad.Logger
     , runStdoutLoggingT
     , withChannelLogger
     , NoLoggingT (..)
+    , LoggerT (..)
+    , LogFunc
 #if WITH_TEMPLATE_HASKELL
     -- * TH logging
     , logDebug
@@ -146,7 +148,7 @@ type CharPos = (Int, Int)
 #endif
 
 class Monad m => MonadLogger msg m | m -> msg where
-    monadLoggerLog :: Loc -> LogSource -> LogLevel -> msg -> m ()
+    monadLoggerLog :: LogFunc msg m
 
 
 {-
@@ -284,10 +286,72 @@ instance MonadBaseControl b m => MonadBaseControl b (NoLoggingT m) where
 instance MonadIO m => MonadLogger msg (NoLoggingT m) where
     monadLoggerLog _ _ _ _ = return ()
 
+-- |
+--
+-- Since 0.4.0
+type LogFunc msg m = Loc -> LogSource -> LogLevel -> msg -> m ()
+
+-- | Generalization of @LoggingT@ allowing arbitrary message types.
+--
+-- Since 0.4.0
+newtype LoggerT msg m a = LoggerT
+    { runLoggerT :: LogFunc msg m -> m a
+    }
+
+instance Monad m => Functor (LoggerT msg m) where
+    fmap = liftM
+
+instance Monad m => Applicative (LoggerT msg m) where
+    pure = return
+    (<*>) = ap
+
+instance Monad m => Monad (LoggerT msg m) where
+    return = LoggerT . const . return
+    LoggerT ma >>= f = LoggerT $ \r -> do
+        a <- ma r
+        let LoggerT f' = f a
+        f' r
+
+instance MonadIO m => MonadIO (LoggerT msg m) where
+    liftIO = Trans.lift . liftIO
+
+instance MonadThrow m => MonadThrow (LoggerT msg m) where
+    monadThrow = Trans.lift . monadThrow
+
+instance MonadResource m => MonadResource (LoggerT msg m) where
+    liftResourceT = Trans.lift . liftResourceT
+
+instance MonadBase b m => MonadBase b (LoggerT msg m) where
+    liftBase = Trans.lift . liftBase
+
+instance Trans.MonadTrans (LoggerT msg) where
+    lift = LoggerT . const
+
+{- No valid instance exists!
+instance MonadTransControl (LoggerT msg) where
+    newtype StT (LoggerT msg) a = StLogger {unStLogger :: a}
+    liftWith f = LoggerT $ \r -> f $ \(LoggerT t) -> liftM StLogger $ t r
+    restoreT = LoggerT . const . liftM unStLogger
+    {-# INLINE liftWith #-}
+    {-# INLINE restoreT #-}
+-}
+
+instance MonadBaseControl b m => MonadBaseControl b (LoggerT msg m) where
+     newtype StM (LoggerT msg m) a = StLoggerMT (StM m a)
+     liftBaseWith f = LoggerT $ \reader' ->
+         liftBaseWith $ \runInBase ->
+             f $ liftM StLoggerMT . runInBase . (\(LoggerT r) -> r reader')
+     restoreM (StLoggerMT base) = LoggerT $ const $ restoreM base
+
+instance (ToLogStr msg, MonadIO m) => MonadLogger msg (LoggerT msg m) where
+    monadLoggerLog a b c d = LoggerT $ \f -> f a b c d
+
 -- | Monad transformer that adds a new logging function.
 --
 -- Since 0.2.2
-newtype LoggingT m a = LoggingT { runLoggingT :: (Loc -> LogSource -> LogLevel -> LogStr -> IO ()) -> m a }
+newtype LoggingT m a = LoggingT
+    { runLoggingT :: LogFunc LogStr IO -> m a
+    }
 
 instance Monad m => Functor (LoggingT m) where
     fmap = liftM
