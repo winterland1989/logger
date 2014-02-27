@@ -8,6 +8,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE FunctionalDependencies #-}
 -- |  This module provides the facilities needed for a decoupled logging system.
 --
 -- The 'MonadLogger' class is implemented by monads that give access to a
@@ -144,8 +145,8 @@ type CharPos = (Int, Int)
 
 #endif
 
-class Monad m => MonadLogger m where
-    monadLoggerLog :: ToLogStr msg => Loc -> LogSource -> LogLevel -> msg -> m ()
+class Monad m => MonadLogger msg m | m -> msg where
+    monadLoggerLog :: Loc -> LogSource -> LogLevel -> msg -> m ()
 
 
 {-
@@ -156,21 +157,21 @@ instance MonadLogger (Lazy.ST s) where monadLoggerLog _ _ _ = return ()
 -}
 
 #define DEF monadLoggerLog a b c d = Trans.lift $ monadLoggerLog a b c d
-instance MonadLogger m => MonadLogger (IdentityT m) where DEF
-instance MonadLogger m => MonadLogger (ListT m) where DEF
-instance MonadLogger m => MonadLogger (MaybeT m) where DEF
-instance (MonadLogger m, Error e) => MonadLogger (ErrorT e m) where DEF
-instance MonadLogger m => MonadLogger (ReaderT r m) where DEF
-instance MonadLogger m => MonadLogger (ContT r m) where DEF
-instance MonadLogger m => MonadLogger (StateT s m) where DEF
-instance (MonadLogger m, Monoid w) => MonadLogger (WriterT w m) where DEF
-instance (MonadLogger m, Monoid w) => MonadLogger (RWST r w s m) where DEF
-instance MonadLogger m => MonadLogger (ResourceT m) where DEF
-instance MonadLogger m => MonadLogger (Pipe l i o u m) where DEF
-instance MonadLogger m => MonadLogger (ConduitM i o m) where DEF
-instance MonadLogger m => MonadLogger (Strict.StateT s m) where DEF
-instance (MonadLogger m, Monoid w) => MonadLogger (Strict.WriterT w m) where DEF
-instance (MonadLogger m, Monoid w) => MonadLogger (Strict.RWST r w s m) where DEF
+instance MonadLogger msg m => MonadLogger msg (IdentityT m) where DEF
+instance MonadLogger msg m => MonadLogger msg (ListT m) where DEF
+instance MonadLogger msg m => MonadLogger msg (MaybeT m) where DEF
+instance (MonadLogger msg m, Error e) => MonadLogger msg (ErrorT e m) where DEF
+instance MonadLogger msg m => MonadLogger msg (ReaderT r m) where DEF
+instance MonadLogger msg m => MonadLogger msg (ContT r m) where DEF
+instance MonadLogger msg m => MonadLogger msg (StateT s m) where DEF
+instance (MonadLogger msg m, Monoid w) => MonadLogger msg (WriterT w m) where DEF
+instance (MonadLogger msg m, Monoid w) => MonadLogger msg (RWST r w s m) where DEF
+instance MonadLogger msg m => MonadLogger msg (ResourceT m) where DEF
+instance MonadLogger msg m => MonadLogger msg (Pipe l i o u m) where DEF
+instance MonadLogger msg m => MonadLogger msg (ConduitM i o m) where DEF
+instance MonadLogger msg m => MonadLogger msg (Strict.StateT s m) where DEF
+instance (MonadLogger msg m, Monoid w) => MonadLogger msg (Strict.WriterT w m) where DEF
+instance (MonadLogger msg m, Monoid w) => MonadLogger msg (Strict.RWST r w s m) where DEF
 #undef DEF
 
 #if WITH_TEMPLATE_HASKELL
@@ -280,7 +281,7 @@ instance MonadBaseControl b m => MonadBaseControl b (NoLoggingT m) where
              f $ liftM StMT' . runInBase . (\(NoLoggingT r) -> r)
      restoreM (StMT' base) = NoLoggingT $ restoreM base
 
-instance MonadIO m => MonadLogger (NoLoggingT m) where
+instance MonadIO m => MonadLogger msg (NoLoggingT m) where
     monadLoggerLog _ _ _ _ = return ()
 
 -- | Monad transformer that adds a new logging function.
@@ -331,7 +332,7 @@ instance MonadBaseControl b m => MonadBaseControl b (LoggingT m) where
              f $ liftM StMT . runInBase . (\(LoggingT r) -> r reader')
      restoreM (StMT base) = LoggingT $ const $ restoreM base
 
-instance MonadIO m => MonadLogger (LoggingT m) where
+instance (ToLogStr msg, MonadIO m) => MonadLogger msg (LoggingT m) where
     monadLoggerLog a b c d = LoggingT $ \f -> liftIO $ f a b c (toLogStr d)
 
 defaultOutput :: Handle
@@ -443,42 +444,42 @@ instance MonadWriter w m => MonadWriter w (LoggingT m) where
 defaultLoc :: Loc
 defaultLoc = Loc "<unknown>" "<unknown>" "<unknown>" (0,0) (0,0)
 
-logDebugN :: MonadLogger m => Text -> m ()
+logDebugN :: MonadLogger msg m => msg -> m ()
 logDebugN msg =
     monadLoggerLog defaultLoc "" LevelDebug msg
 
-logInfoN :: MonadLogger m => Text -> m ()
+logInfoN :: MonadLogger msg m => msg -> m ()
 logInfoN msg =
     monadLoggerLog defaultLoc "" LevelInfo msg
 
-logWarnN :: MonadLogger m => Text -> m ()
+logWarnN :: MonadLogger msg m => msg -> m ()
 logWarnN msg =
     monadLoggerLog defaultLoc "" LevelWarn msg
 
-logErrorN :: MonadLogger m => Text -> m ()
+logErrorN :: MonadLogger msg m => msg -> m ()
 logErrorN msg =
     monadLoggerLog defaultLoc "" LevelError msg
 
-logOtherN :: MonadLogger m => LogLevel -> Text -> m ()
+logOtherN :: MonadLogger msg m => LogLevel -> msg -> m ()
 logOtherN level msg =
     monadLoggerLog defaultLoc "" level msg
 
-logDebugNS :: MonadLogger m => Text -> Text -> m ()
+logDebugNS :: MonadLogger msg m => LogSource -> msg -> m ()
 logDebugNS src msg =
     monadLoggerLog defaultLoc src LevelDebug msg
 
-logInfoNS :: MonadLogger m => Text -> Text -> m ()
+logInfoNS :: MonadLogger msg m => LogSource -> msg -> m ()
 logInfoNS src msg =
     monadLoggerLog defaultLoc src LevelInfo msg
 
-logWarnNS :: MonadLogger m => Text -> Text -> m ()
+logWarnNS :: MonadLogger msg m => LogSource -> msg -> m ()
 logWarnNS src msg =
     monadLoggerLog defaultLoc src LevelWarn msg
 
-logErrorNS :: MonadLogger m => Text -> Text -> m ()
+logErrorNS :: MonadLogger msg m => LogSource -> msg -> m ()
 logErrorNS src msg =
     monadLoggerLog defaultLoc src LevelError msg
 
-logOtherNS :: MonadLogger m => Text -> LogLevel -> Text -> m ()
+logOtherNS :: MonadLogger msg m => LogSource -> LogLevel -> msg -> m ()
 logOtherNS src level msg =
     monadLoggerLog defaultLoc src level msg
