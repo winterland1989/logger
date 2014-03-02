@@ -508,42 +508,42 @@ instance MonadWriter w m => MonadWriter w (LoggingT m) where
 defaultLoc :: Loc
 defaultLoc = Loc "<unknown>" "<unknown>" "<unknown>" (0,0) (0,0)
 
-logDebugN :: MonadLogger msg m => msg -> m ()
+logDebugN :: MonadLogger Text m => Text -> m ()
 logDebugN msg =
     monadLoggerLog defaultLoc "" LevelDebug msg
 
-logInfoN :: MonadLogger msg m => msg -> m ()
+logInfoN :: MonadLogger Text m => Text -> m ()
 logInfoN msg =
     monadLoggerLog defaultLoc "" LevelInfo msg
 
-logWarnN :: MonadLogger msg m => msg -> m ()
+logWarnN :: MonadLogger Text m => Text -> m ()
 logWarnN msg =
     monadLoggerLog defaultLoc "" LevelWarn msg
 
-logErrorN :: MonadLogger msg m => msg -> m ()
+logErrorN :: MonadLogger Text m => Text -> m ()
 logErrorN msg =
     monadLoggerLog defaultLoc "" LevelError msg
 
-logOtherN :: MonadLogger msg m => LogLevel -> msg -> m ()
+logOtherN :: MonadLogger Text m => LogLevel -> Text -> m ()
 logOtherN level msg =
     monadLoggerLog defaultLoc "" level msg
 
-logDebugNS :: MonadLogger msg m => LogSource -> msg -> m ()
+logDebugNS :: MonadLogger Text m => LogSource -> Text -> m ()
 logDebugNS src msg =
     monadLoggerLog defaultLoc src LevelDebug msg
 
-logInfoNS :: MonadLogger msg m => LogSource -> msg -> m ()
+logInfoNS :: MonadLogger Text m => LogSource -> Text -> m ()
 logInfoNS src msg =
     monadLoggerLog defaultLoc src LevelInfo msg
 
-logWarnNS :: MonadLogger msg m => LogSource -> msg -> m ()
+logWarnNS :: MonadLogger Text m => LogSource -> Text -> m ()
 logWarnNS src msg =
     monadLoggerLog defaultLoc src LevelWarn msg
 
-logErrorNS :: MonadLogger msg m => LogSource -> msg -> m ()
+logErrorNS :: MonadLogger Text m => LogSource -> Text -> m ()
 logErrorNS src msg =
     monadLoggerLog defaultLoc src LevelError msg
 
-logOtherNS :: MonadLogger msg m => LogSource -> LogLevel -> msg -> m ()
+logOtherNS :: MonadLogger Text m => LogSource -> LogLevel -> Text -> m ()
 logOtherNS src level msg =
     monadLoggerLog defaultLoc src level msg
