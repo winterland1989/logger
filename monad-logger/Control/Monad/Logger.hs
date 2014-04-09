@@ -358,8 +358,21 @@ instance Monad m => Monad (LoggerT msg m) where
 instance MonadIO m => MonadIO (LoggerT msg m) where
     liftIO = Trans.lift . liftIO
 
+#if MIN_VERSION_resourcet(1,1,0)
+instance MonadThrow m => MonadThrow (LoggerT msg m) where
+    throwM = Trans.lift . throwM
+instance MonadCatch m => MonadCatch (LoggerT msg m) where
+  catch (LoggerT m) c =
+      LoggerT $ \r -> m r `catch` \e -> runLoggerT (c e) r
+  mask a = LoggerT $ \e -> mask $ \u -> runLoggerT (a $ q u) e
+    where q u (LoggerT b) = LoggerT (u . b)
+  uninterruptibleMask a =
+    LoggerT $ \e -> uninterruptibleMask $ \u -> runLoggerT (a $ q u) e
+      where q u (LoggerT b) = LoggerT (u . b)
+#else
 instance MonadThrow m => MonadThrow (LoggerT msg m) where
     monadThrow = Trans.lift . monadThrow
+#endif
 
 instance MonadResource m => MonadResource (LoggerT msg m) where
     liftResourceT = Trans.lift . liftResourceT
@@ -578,7 +591,7 @@ instance MonadWriter w m => MonadWriter w (LoggingT m) where
 defaultLoc :: Loc
 defaultLoc = Loc "<unknown>" "<unknown>" "<unknown>" (0,0) (0,0)
 
-logWithoutLoc :: (MonadLogger Text m, ToLogStr msg) => LogSource -> LogLevel -> msg -> m ()
+logWithoutLoc :: (MonadLogger msg m, ToLogStr msg) => LogSource -> LogLevel -> msg -> m ()
 logWithoutLoc = monadLoggerLog defaultLoc
 
 logDebugN :: MonadLogger Text m => Text -> m ()
