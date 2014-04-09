@@ -80,7 +80,7 @@ import Data.Monoid (Monoid)
 import Control.Applicative (Applicative (..))
 import Control.Concurrent.STM
 import Control.Concurrent.STM.TBChan
-import Control.Exception.Lifted
+import Control.Exception.Lifted (onException)
 import Control.Monad (liftM, ap, when, void)
 import Control.Monad.Base (MonadBase (liftBase))
 import Control.Monad.Loops (untilM)
@@ -88,7 +88,11 @@ import Control.Monad.Trans.Control (MonadBaseControl (..), MonadTransControl (..
 import qualified Control.Monad.Trans.Class as Trans
 
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Control.Monad.Trans.Resource (MonadResource (liftResourceT), MonadThrow (monadThrow))
+import Control.Monad.Trans.Resource (MonadResource (liftResourceT), MonadThrow, monadThrow)
+#if MIN_VERSION_resourcet(1,1,0)
+import Control.Monad.Trans.Resource (throwM)
+import Control.Monad.Catch (MonadCatch (..))
+#endif
 
 import Control.Monad.Trans.Identity ( IdentityT)
 import Control.Monad.Trans.List     ( ListT    )
@@ -123,6 +127,13 @@ import Control.Monad.Writer.Class ( MonadWriter (..) )
 
 import Blaze.ByteString.Builder (toByteString)
 
+import Prelude hiding (catch)
+
+#if !MIN_VERSION_fast_logger(2, 1, 0) && MIN_VERSION_bytestring(0, 10, 2)
+import qualified Data.ByteString.Lazy as L
+import Data.ByteString.Builder (toLazyByteString)
+#endif
+
 data LogLevel = LevelDebug | LevelInfo | LevelWarn | LevelError | LevelOther Text
     deriving (Eq, Prelude.Show, Prelude.Read, Ord)
 
@@ -132,8 +143,8 @@ type LogSource = Text
 
 instance Lift LogLevel where
     lift LevelDebug = [|LevelDebug|]
-    lift LevelInfo = [|LevelInfo|]
-    lift LevelWarn = [|LevelWarn|]
+    lift LevelInfo  = [|LevelInfo|]
+    lift LevelWarn  = [|LevelWarn|]
     lift LevelError = [|LevelError|]
     lift (LevelOther x) = [|LevelOther $ pack $(lift $ unpack x)|]
 
@@ -259,8 +270,22 @@ instance Monad m => Monad (NoLoggingT m) where
 instance MonadIO m => MonadIO (NoLoggingT m) where
     liftIO = Trans.lift . liftIO
 
+#if MIN_VERSION_resourcet(1,1,0)
+instance MonadThrow m => MonadThrow (NoLoggingT m) where
+    throwM = Trans.lift . throwM
+
+instance MonadCatch m => MonadCatch (NoLoggingT m) where
+    catch (NoLoggingT m) c =
+        NoLoggingT $ m `catch` \e -> runNoLoggingT (c e)
+    mask a = NoLoggingT $ mask $ \u -> runNoLoggingT (a $ q u)
+      where q u (NoLoggingT b) = NoLoggingT $ u b
+    uninterruptibleMask a =
+        NoLoggingT $ uninterruptibleMask $ \u -> runNoLoggingT (a $ q u)
+      where q u (NoLoggingT b) = NoLoggingT $ u b
+#else
 instance MonadThrow m => MonadThrow (NoLoggingT m) where
     monadThrow = Trans.lift . monadThrow
+#endif
 
 instance MonadResource m => MonadResource (NoLoggingT m) where
     liftResourceT = Trans.lift . liftResourceT
@@ -388,8 +413,21 @@ instance Monad m => Monad (LoggingT m) where
 instance MonadIO m => MonadIO (LoggingT m) where
     liftIO = Trans.lift . liftIO
 
+#if MIN_VERSION_resourcet(1,1,0)
+instance MonadThrow m => MonadThrow (LoggingT m) where
+    throwM = Trans.lift . throwM
+instance MonadCatch m => MonadCatch (LoggingT m) where
+  catch (LoggingT m) c =
+      LoggingT $ \r -> m r `catch` \e -> runLoggingT (c e) r
+  mask a = LoggingT $ \e -> mask $ \u -> runLoggingT (a $ q u) e
+    where q u (LoggingT b) = LoggingT (u . b)
+  uninterruptibleMask a =
+    LoggingT $ \e -> uninterruptibleMask $ \u -> runLoggingT (a $ q u) e
+      where q u (LoggingT b) = LoggingT (u . b)
+#else
 instance MonadThrow m => MonadThrow (LoggingT m) where
     monadThrow = Trans.lift . monadThrow
+#endif
 
 instance MonadResource m => MonadResource (LoggingT m) where
     liftResourceT = Trans.lift . liftResourceT
@@ -437,16 +475,18 @@ defaultLogStrBS a b c d =
   where
     toBS = fromLogStr
 
+defaultLogLevelStr :: LogLevel -> LogStr
+defaultLogLevelStr level = case level of
+    LevelOther t -> toLogStr t
+    _            -> toLogStr $ S8.pack $ drop 5 $ show level
+
 defaultLogStr :: Loc
               -> LogSource
               -> LogLevel
               -> LogStr
               -> LogStr
 defaultLogStr loc src level msg =
-    "[" `mappend`
-    (case level of
-        LevelOther t -> toLogStr t
-        _ -> toLogStr $ S8.pack $ drop 5 $ show level) `mappend`
+    "[" `mappend` defaultLogLevelStr level `mappend`
     (if T.null src
         then mempty
         else "#" `mappend` toLogStr src) `mappend`
@@ -464,6 +504,18 @@ defaultLogStr loc src level msg =
       where
         line = show . fst . loc_start
         char = show . snd . loc_start
+{-
+defaultLogStrWithoutLoc ::
+    LogSource -> LogLevel -> LogStr -> LogStr
+defaultLogStrWithoutLoc loc src level msg =
+    "[" `mappend` defaultLogLevelStr level `mappend`
+    (if T.null src
+        then mempty
+        else "#" `mappend` toLogStr src) `mappend`
+    "] " `mappend`
+    msg `mappend` "\n"
+-}
+
 
 -- | Run a block using a @MonadLogger@ instance which prints to stderr.
 --
@@ -526,42 +578,45 @@ instance MonadWriter w m => MonadWriter w (LoggingT m) where
 defaultLoc :: Loc
 defaultLoc = Loc "<unknown>" "<unknown>" "<unknown>" (0,0) (0,0)
 
+logWithoutLoc :: (MonadLogger Text m, ToLogStr msg) => LogSource -> LogLevel -> msg -> m ()
+logWithoutLoc = monadLoggerLog defaultLoc
+
 logDebugN :: MonadLogger Text m => Text -> m ()
 logDebugN msg =
-    monadLoggerLog defaultLoc "" LevelDebug msg
+    logWithoutLoc "" LevelDebug msg
 
 logInfoN :: MonadLogger Text m => Text -> m ()
 logInfoN msg =
-    monadLoggerLog defaultLoc "" LevelInfo msg
+    logWithoutLoc "" LevelInfo msg
 
 logWarnN :: MonadLogger Text m => Text -> m ()
 logWarnN msg =
-    monadLoggerLog defaultLoc "" LevelWarn msg
+    logWithoutLoc "" LevelWarn msg
 
 logErrorN :: MonadLogger Text m => Text -> m ()
 logErrorN msg =
-    monadLoggerLog defaultLoc "" LevelError msg
+    logWithoutLoc "" LevelError msg
 
 logOtherN :: MonadLogger Text m => LogLevel -> Text -> m ()
 logOtherN level msg =
-    monadLoggerLog defaultLoc "" level msg
+    logWithoutLoc "" level msg
 
 logDebugNS :: MonadLogger Text m => LogSource -> Text -> m ()
 logDebugNS src msg =
-    monadLoggerLog defaultLoc src LevelDebug msg
+    logWithoutLoc src LevelDebug msg
 
 logInfoNS :: MonadLogger Text m => LogSource -> Text -> m ()
 logInfoNS src msg =
-    monadLoggerLog defaultLoc src LevelInfo msg
+    logWithoutLoc src LevelInfo msg
 
 logWarnNS :: MonadLogger Text m => LogSource -> Text -> m ()
 logWarnNS src msg =
-    monadLoggerLog defaultLoc src LevelWarn msg
+    logWithoutLoc src LevelWarn msg
 
 logErrorNS :: MonadLogger Text m => LogSource -> Text -> m ()
 logErrorNS src msg =
-    monadLoggerLog defaultLoc src LevelError msg
+    logWithoutLoc src LevelError msg
 
 logOtherNS :: MonadLogger Text m => LogSource -> LogLevel -> Text -> m ()
 logOtherNS src level msg =
-    monadLoggerLog defaultLoc src level msg
+    logWithoutLoc src level msg
