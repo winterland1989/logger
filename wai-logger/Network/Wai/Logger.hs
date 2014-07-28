@@ -50,7 +50,8 @@ module Network.Wai.Logger (
   , showSockAddr
   ) where
 
-import Control.Concurrent (forkIO, threadDelay, killThread)
+import Control.AutoUpdate (mkAutoUpdate, defaultUpdateSettings,
+                           updateAction)
 import Control.Exception (handle, SomeException(..), bracket)
 import Control.Monad (when, void)
 import Network.HTTP.Types (Status)
@@ -68,7 +69,7 @@ import Network.Wai.Logger.IP (showSockAddr)
 --   This 'ApacheLogger' writes log message to stdout.
 --   Each buffer (4K bytes) is flushed every second.
 withStdoutLogger :: (ApacheLogger -> IO a) -> IO a
-withStdoutLogger app = bracket setup teardown $ \(aplogger, _, _) ->
+withStdoutLogger app = bracket setup teardown $ \(aplogger, _) ->
     app aplogger
   where
     setup = do
@@ -160,7 +161,7 @@ callbackLoggerInit ipsrc cb flush dateget = do
     flush' <- mkAutoUpdate defaultUpdateSettings
         { updateAction = flush
         }
-    let logger = apache cb ipsrc dateget >> flush'
+    let logger x y z = apache cb ipsrc dateget x y z >> flush'
         noRotator = return ()
         remover = return ()
     return ApacheLoggerActions {
